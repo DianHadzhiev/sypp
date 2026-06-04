@@ -1,0 +1,18 @@
+.constant
+	piet 3
+	koos 2
+	jan 1
+.end-constant
+
+.main
+	NOP
+	LDC_W piet
+	DUP
+	LDC_W koos
+	IADD
+	LDC_W jan
+	IADD
+	OUT
+	NOP
+  HALT
+.end-main

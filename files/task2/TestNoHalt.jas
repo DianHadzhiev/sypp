@@ -1,0 +1,13 @@
+.main
+    BIPUSH 10
+    BIPUSH 20
+    NOP
+    NOP
+    IADD
+    NOP 
+    NOP
+    NOP
+    DUP 
+    IADD
+    NOP
+.end-main
