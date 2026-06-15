@@ -2,7 +2,7 @@
 #include <stdlib.h> // malloc, free
 #include "ijvm.h"
 #include "util.h" // read this file for debug prints, endianness helper functions
-
+#include "ijvm_struct.h"
 
 // see ijvm.h for descriptions of the below functions
 
@@ -17,64 +17,372 @@ ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
   m->in = input;
   m->out = output;
   
-  // TODO: implement me
+  m->pc = 0;
+  m->sp = -1;
+  m->lv = 0;
+  m->constant_pool = NULL;
+  m->text = NULL;
+  m->stack = NULL;
+  m->constant_pool_size = 0;
+  m->text_size = 0;
+  m->halted = false;
 
+  // read binary file, rb
+  FILE* f = fopen(binary_path, "rb");
+  
+  uint8_t buf[4];
+  
+  //read first 4 bytes, magic number
+  fread(buf, 4, 1, f);
+  if (read_uint32(buf) != 0x1DEADFAD){
+    fclose(f);
+    destroy_ijvm(m);
+    return NULL;
+  }
+
+  //read constant origin
+  fread(buf, 4, 1, f);
+  m->constant_pool_origin = read_uint32(buf);
+  //read constant size
+  fread(buf, 4, 1, f);
+  m->constant_pool_size = read_uint32(buf);
+
+  m->constant_pool = malloc(m->constant_pool_size);
+
+  if (m->constant_pool == NULL) { 
+    fclose(f); 
+    destroy_ijvm(m);
+    return NULL;
+  }
+  // read constant pool
+  fread(m->constant_pool, 1, m->constant_pool_size, f);
+
+  // Read text section
+  fread(buf, 4, 1, f);
+  m->text_origin = read_uint32(buf);
+  fread(buf, 4, 1, f); 
+  m->text_size  = read_uint32(buf);
+
+  m->text = malloc(m->text_size); 
+  if (m->text == NULL) { 
+    fclose(f); 
+    destroy_ijvm(m);
+    return NULL; 
+  }
+  
+  //read text
+  fread(m->text, 1, m->text_size, f);
+
+  // Allocate stack memory with size of 1000 32 bit integers
+  m->stack = malloc(sizeof(Stack));
+  stack_init(m->stack);
+  for (int i = 0; i < 256; i++) {
+      stack_push(m->stack, 0);
+  }
+  m->lv = 0;
+
+  fclose(f);
   return m;
 }
 
 void destroy_ijvm(ijvm* m) 
 {
-  // TODO: implement me
-
+  if (m == NULL) return;
+  free(m->constant_pool);
+  free(m->text);
+  if (m->stack != NULL) {
+      stack_free(m->stack);
+      free(m->stack);
+  }
   free(m); // free memory for struct
 }
 
 uint8_t *get_text(ijvm* m) 
 {
-  // TODO: implement me
-  return NULL;
+  return m->text;
 }
 
 uint32_t get_text_size(ijvm* m) 
 {
-  // TODO: implement me
-  return 0;
+    return m->text_size;
 }
 
 int32_t get_constant(ijvm* m, uint32_t i) 
 {
-  // TODO: implement me
-  return 0;
+  uint32_t byte_offset = i * 4; 
+  return read_int32(&m->constant_pool[byte_offset]);
 }
 
 uint32_t get_program_counter(ijvm* m) 
 {
-  // TODO: implement me
-  return 0;
+  return m->pc;
 }
 
 int32_t tos(ijvm* m) 
 {
-  // this operation should NOT pop (remove top element from stack)
-  // TODO: implement me
-  return -1;
+  return stack_top(m->stack);
 }
 
+// returns true if program is halted or pc has reached end of text section i.e.
+// all instructions stored in text section are executed
 bool finished(ijvm* m) 
 {
-  // TODO: implement me
-  return false;
+  return m->halted || m->pc >= m->text_size;
 }
 
+// return local variable of a function at index i inside stack frame
 int32_t get_local_variable(ijvm* m, uint32_t i) 
 {
-  // TODO: implement me
-  return 0;
+  return stack_get(m->stack, m->lv + i);
+}
+
+int calc_offset(ijvm* m){
+  uint8_t byte1 = m->text[m->pc]; // shift first byte 8 bits to the left
+  uint8_t byte2 = m->text[m->pc + 1]; // add second byte 
+  int16_t offset = (int16_t)((byte1 << 8) | byte2); // OR operations to append byte 2
+  return offset;
 }
 
 void step(ijvm* m) 
 {
-  // TODO: implement me
+  uint8_t instruction = get_instruction(m);
+  m->pc++;
+
+  switch(instruction)
+  {
+    case OP_BIPUSH:
+    {
+      int8_t operand = (int8_t)m->text[m->pc];
+      m->pc++;
+      stack_push(m->stack, operand);
+      break;
+    }
+
+    case OP_IAND:
+    {
+      int32_t top = stack_pop(m->stack);
+      int32_t val2 = stack_pop(m->stack);
+      int32_t res = top & val2;
+      stack_push(m->stack, res);
+      break;
+    }
+    
+    case OP_DUP:
+    {
+      int32_t val = stack_top(m->stack);
+      stack_push(m->stack, val);
+      break;
+    }
+
+    case OP_IADD:
+    {
+      int32_t val1 = stack_pop(m->stack);
+      int32_t val2 = stack_pop(m->stack);
+      int32_t res = val1 + val2;
+      stack_push(m->stack, res);
+      break;
+    }
+
+    case OP_IOR:
+    {
+      int32_t val1 = stack_pop(m->stack);
+      int32_t val2 = stack_pop(m->stack);
+      int32_t res = val1 | val2;
+      stack_push(m->stack, res);
+      break;
+    }
+    
+    case OP_ISUB:
+    {
+      int32_t val1 = stack_pop(m->stack);
+      int32_t val2 = stack_pop(m->stack);
+      int32_t res = val2 - val1;
+      stack_push(m->stack, res);
+      break;
+    }
+    
+    case OP_NOP:
+
+      break;
+    
+    case OP_SWAP:
+    {
+      int32_t top = stack_pop(m->stack);
+      int32_t newTop = stack_pop(m->stack);
+      stack_push(m->stack, top);
+      stack_push(m->stack, newTop);
+      break;
+    }
+    
+    case OP_ERR:
+      fprintf(m->out, "Error!\n");
+      m->halted = true;
+      break;
+
+    case OP_HALT:
+      m->halted = true;
+      break;
+
+    case OP_IN:
+    {
+      int value = fgetc(m->in);
+      stack_push(m->stack, value);
+      break;
+    }
+    
+    case OP_OUT:
+    {
+      int value = stack_pop(m->stack);
+      fprintf(m->out, "%c", value);
+      break;
+    }
+
+    case OP_POP:
+      stack_pop(m->stack);
+      break;
+
+    case OP_GOTO:
+    {
+      int offset = calc_offset(m);
+      uint32_t opcode_address = m->pc - 1;
+      m->pc= opcode_address + offset;
+      break;
+    }
+
+    case OP_IFEQ:
+    {
+      int32_t word = stack_pop(m->stack);
+      int offset = calc_offset(m);
+
+      uint32_t opcode_address = m->pc - 1;
+
+      if (word == 0) {
+        m->pc = opcode_address + offset;
+      } 
+      else {
+        m->pc += 2;
+      }
+      break;
+    }
+
+    case OP_IFLT:
+    {
+      int32_t word = stack_pop(m->stack);
+      int offset = calc_offset(m);
+      uint32_t opcode_address = m->pc - 1;
+
+      if (word < 0) {
+        m->pc = opcode_address + offset;
+      } 
+      else {
+        m->pc += 2;
+      }
+      break;
+    }
+
+    case OP_IF_ICMPEQ:
+    {
+      int32_t word1 = stack_pop(m->stack);
+      int32_t word2 = stack_pop(m->stack);
+      int offset = calc_offset(m);
+
+      uint32_t opcode_address = m->pc - 1;
+
+      if (word1 == word2) {
+        m->pc = opcode_address + offset;
+      } 
+      else {
+        m->pc = opcode_address +  3;
+      }
+      break;
+    }
+
+    case OP_LDC_W:
+    {
+      uint16_t index = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+      m->pc+= 2;
+      int32_t constants = get_constant(m, index);
+      stack_push(m->stack, constants);
+      break;
+    }
+
+    case OP_IINC:
+    {
+      uint8_t i = m->text[m->pc]; 
+      int8_t val = m->text[m->pc + 1]; // value to increment variable at index i
+
+      int32_t initialVal = stack_get(m->stack, m->lv + i);
+      stack_set(m->stack, m->lv + i, initialVal + val);
+
+      m->pc+=2;
+      break;
+
+    }
+
+    case OP_ILOAD:
+    {
+      uint8_t i = m->text[m->pc];
+      m->pc += 1;
+      int32_t var = get_local_variable(m, i);
+
+      stack_push(m->stack, var);
+      break;
+    }
+
+    case OP_ISTORE:
+    {
+      int32_t word = stack_pop(m->stack);
+      uint8_t i = m->text[m->pc];
+      m->pc += 1;
+      stack_set(m->stack, m->lv + i, word);
+      break;
+    }
+
+    case OP_WIDE:
+    {
+      uint8_t op = m->text[m->pc];
+      m->pc++;
+
+      switch (op)
+      {
+       case OP_IINC:
+       {
+        uint16_t i  = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+        int8_t val  = m->text[m->pc + 2];  
+        int32_t cur = stack_get(m->stack, m->lv + i);
+        stack_set(m->stack, m->lv + i, cur + val);
+        m->pc += 3;   
+        break;
+       }
+        
+        case OP_ILOAD:
+        {
+          uint16_t i = (m->text[m->pc] << 8) | m->text[m->pc + 1]; 
+          m->pc += 2;
+          stack_push(m->stack, stack_get(m->stack, m->lv + i));
+          break;
+        }
+
+        case OP_ISTORE:
+        {
+          uint16_t i = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+          m->pc += 2;
+          
+          stack_set(m->stack, m->lv + i, stack_pop(m->stack));
+          break;
+        }
+
+        default:
+          m->halted = true;
+          break;
+      }
+      break;
+    }
+
+    default:
+      m->halted = true;
+      break;
+  }
 
 }
 
@@ -95,7 +403,6 @@ void run(ijvm* m)
     step(m);
   }
 }
-
 
 // Below: methods needed by bonus assignments, see ijvm.h
 // You can leave these unimplemented if you are not doing these bonus 
