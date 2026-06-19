@@ -18,8 +18,8 @@ ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
   m->out = output;
   
   m->pc = 0;
-  m->sp = -1;
   m->lv = 0;
+  m->bp = -1;
   m->constant_pool = NULL;
   m->text = NULL;
   m->stack = NULL;
@@ -73,7 +73,7 @@ ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
   //read text
   fread(m->text, 1, m->text_size, f);
 
-  // Allocate stack memory with size of 1000 32 bit integers
+  // Allocate stack memory with size of 256 32 bit integers
   m->stack = malloc(sizeof(Stack));
   stack_init(m->stack);
   for (int i = 0; i < 256; i++) {
@@ -136,7 +136,7 @@ int32_t get_local_variable(ijvm* m, uint32_t i)
   return stack_get(m->stack, m->lv + i);
 }
 
-int calc_offset(ijvm* m){
+int16_t calc_offset(ijvm* m){
   uint8_t byte1 = m->text[m->pc]; // shift first byte 8 bits to the left
   uint8_t byte2 = m->text[m->pc + 1]; // add second byte 
   int16_t offset = (int16_t)((byte1 << 8) | byte2); // OR operations to append byte 2
@@ -226,6 +226,7 @@ void step(ijvm* m)
     case OP_IN:
     {
       int value = fgetc(m->in);
+      if (value == EOF) value = 0;
       stack_push(m->stack, value);
       break;
     }
@@ -260,7 +261,7 @@ void step(ijvm* m)
         m->pc = opcode_address + offset;
       } 
       else {
-        m->pc += 2;
+        m->pc += 2; // skip 2 bytes i.e. short argument
       }
       break;
     }
@@ -292,14 +293,14 @@ void step(ijvm* m)
         m->pc = opcode_address + offset;
       } 
       else {
-        m->pc = opcode_address +  3;
+        m->pc += 2;
       }
       break;
     }
 
     case OP_LDC_W:
     {
-      uint16_t index = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+      uint16_t index =(uint16_t) ((m->text[m->pc] << 8) | m->text[m->pc + 1]);
       m->pc+= 2;
       int32_t constants = get_constant(m, index);
       stack_push(m->stack, constants);
@@ -332,7 +333,7 @@ void step(ijvm* m)
     case OP_ISTORE:
     {
       int32_t word = stack_pop(m->stack);
-      uint8_t i = m->text[m->pc];
+      uint8_t i = (uint8_t)m->text[m->pc];
       m->pc += 1;
       stack_set(m->stack, m->lv + i, word);
       break;
@@ -345,15 +346,15 @@ void step(ijvm* m)
 
       switch (op)
       {
-       case OP_IINC:
-       {
-        uint16_t i  = (m->text[m->pc] << 8) | m->text[m->pc + 1];
-        int8_t val  = m->text[m->pc + 2];  
+        case OP_IINC:
+        {
+        uint16_t i  = (uint16_t) (m->text[m->pc] << 8) | m->text[m->pc + 1];
+        int8_t val  = (int8_t)m->text[m->pc + 2];  
         int32_t cur = stack_get(m->stack, m->lv + i);
         stack_set(m->stack, m->lv + i, cur + val);
         m->pc += 3;   
         break;
-       }
+        }
         
         case OP_ILOAD:
         {
@@ -365,9 +366,8 @@ void step(ijvm* m)
 
         case OP_ISTORE:
         {
-          uint16_t i = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+          uint16_t i = (uint16_t)((m->text[m->pc] << 8) | m->text[m->pc + 1]);
           m->pc += 2;
-          
           stack_set(m->stack, m->lv + i, stack_pop(m->stack));
           break;
         }
@@ -377,6 +377,75 @@ void step(ijvm* m)
           break;
       }
       break;
+    }
+
+    case OP_INVOKEVIRTUAL:
+    {
+      uint16_t index  = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+      m->pc += 2;
+
+      int32_t methodAreaIndex = get_constant(m, index);
+      uint16_t numArgs = (m->text[methodAreaIndex] << 8) | (m->text[methodAreaIndex + 1]);
+      uint16_t numLocals = (m->text[methodAreaIndex + 2] << 8) | (m->text[methodAreaIndex + 3]);
+      
+      //save frame state for return
+      int32_t old_lv = m->lv;
+      int32_t old_sp = m->stack->size - 1 - numArgs; // args arleady pushed at this point
+      int32_t old_pc = m->pc;
+      int32_t old_bp = m->bp; 
+
+      for(int i = 0; i < numLocals; i++){
+        stack_push(m->stack, 0);
+      }
+
+      int32_t new_bp = m->stack->size; // start of frame info
+
+      stack_push(m->stack, old_pc); 
+      stack_push(m->stack, old_bp);
+      stack_push(m->stack, old_lv);
+      stack_push(m->stack, old_sp);
+      
+      m->lv = new_bp - numLocals - numArgs; // index of OBJREF
+      m->bp = new_bp;
+      m->pc = methodAreaIndex + 4;
+
+      break;
+    }
+
+    
+    case OP_IRETURN:
+    {
+      int32_t ret_value = stack_pop(m->stack); // value returned by method
+      m->stack->size = m->bp + 4;
+
+      //pop old state in same order
+      int32_t old_sp = stack_pop(m->stack);
+      int32_t old_lv = stack_pop(m->stack);
+      int32_t old_bp   = stack_pop(m->stack);
+      int32_t old_pc = stack_pop(m->stack);
+
+      // restore state
+      m->stack->size = old_sp + 1;
+      m->lv = old_lv;
+      m->pc = old_pc;
+      m->bp = old_bp;
+
+      stack_push(m->stack, ret_value); // push returned value for further computation
+
+      break;
+    }
+
+    case OP_TAILCALL:
+    {
+      uint16_t index = (m->text[m->pc] << 8) | m->text[m->pc + 1];
+      m->pc += 2;
+
+      int32_t methodAreaIndex = get_constant(m, index);
+      uint16_t numArgs   = (m->text[methodAreaIndex]     << 8) | m->text[methodAreaIndex + 1];
+      uint16_t numLocals = (m->text[methodAreaIndex + 2] << 8) | m->text[methodAreaIndex + 3];
+
+      int32_t new_args_start = m->stack->size - numArgs;
+
     }
 
     default:

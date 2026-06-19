@@ -27,8 +27,8 @@ typedef struct IJVM {
     uint32_t text_size;
     
     uint32_t pc;   
-    int32_t  sp;   
     int32_t  lv;
+    int32_t bp;
     Stack *stack;
 
     bool halted;
