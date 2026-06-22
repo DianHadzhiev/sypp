@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>  /* contains type FILE * */
 #include "stack.h"
+#include "heap.h"
 
 
 /**
@@ -30,7 +31,7 @@ typedef struct IJVM {
     int32_t  lv;
     int32_t bp;
     Stack *stack;
-
+    Heap *heap;
     bool halted;
 } ijvm;
 

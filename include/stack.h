@@ -8,8 +8,8 @@
 
 typedef struct {
     int32_t *data;
-    int size;
-    int capacity;
+    u_int32_t size;
+    u_int32_t capacity;
 } Stack;
 
 void     stack_init(Stack *s);

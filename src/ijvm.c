@@ -1,19 +1,20 @@
 #include <stdio.h>  // for getc, printf
 #include <stdlib.h> // malloc, free
+#include <signal.h>
 #include "ijvm.h"
 #include "util.h" // read this file for debug prints, endianness helper functions
 #include "ijvm_struct.h"
+#include "snapshot.h"
+
 
 // see ijvm.h for descriptions of the below functions
 
 ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
 {
-  // do not change the lines above "TODO: implement me"
+  signal(SIGINT, handle_sigint);
+
   ijvm* m = (ijvm *) malloc(sizeof(ijvm));
-  // note that malloc gives you memory, but gives no guarantees on the initial
-  // values of that memory. It might be all zeroes, or be random data.
-  // It is hence important that you initialize all variables in the ijvm
-  // struct and do not assume these are set to zero.
+
   m->in = input;
   m->out = output;
   
@@ -26,6 +27,7 @@ ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
   m->constant_pool_size = 0;
   m->text_size = 0;
   m->halted = false;
+  m->heap = NULL;
 
   // read binary file, rb
   FILE* f = fopen(binary_path, "rb");
@@ -79,6 +81,15 @@ ijvm* init_ijvm(char *binary_path, FILE* input, FILE* output)
   for (int i = 0; i < 256; i++) {
       stack_push(m->stack, 0);
   }
+
+  m->heap = malloc(sizeof(Heap));
+  if (m->heap == NULL) {
+      fclose(f);
+      destroy_ijvm(m);
+      return NULL;
+  }
+  heap_init(m->heap);
+
   m->lv = 0;
 
   fclose(f);
@@ -94,6 +105,10 @@ void destroy_ijvm(ijvm* m)
       stack_free(m->stack);
       free(m->stack);
   }
+  if (m->heap != NULL) {
+        heap_destroy(m->heap);
+        free(m->heap);
+    }
   free(m); // free memory for struct
 }
 
@@ -411,7 +426,6 @@ void step(ijvm* m)
 
       break;
     }
-
     
     case OP_IRETURN:
     {
@@ -421,7 +435,7 @@ void step(ijvm* m)
       //pop old state in same order
       int32_t old_sp = stack_pop(m->stack);
       int32_t old_lv = stack_pop(m->stack);
-      int32_t old_bp   = stack_pop(m->stack);
+      int32_t old_bp = stack_pop(m->stack);
       int32_t old_pc = stack_pop(m->stack);
 
       // restore state
@@ -446,6 +460,78 @@ void step(ijvm* m)
 
       int32_t new_args_start = m->stack->size - numArgs;
 
+      int32_t old_pc = stack_get(m->stack, m->bp);
+      int32_t old_bp = stack_get(m->stack, m->bp + 1);
+      int32_t old_lv = stack_get(m->stack, m->bp + 2);
+      int32_t old_sp = stack_get(m->stack, m->bp + 3);
+      
+      //overwrite current frame with new args
+      for(int i = 0; i < numArgs; i++){
+        int32_t val = stack_get(m->stack, new_args_start + i);
+        stack_set(m->stack, m->lv + i, val);
+      }
+
+      //remove current frame
+      m->stack->size = m->lv + numArgs;
+
+      for(int i = 0; i < numLocals; i++) {
+        stack_push(m->stack, 0);
+      }
+
+      m->bp = m->stack->size;
+
+      stack_push(m->stack, old_pc);
+      stack_push(m->stack, old_bp);
+      stack_push(m->stack, old_lv);
+      stack_push(m->stack, old_sp);
+
+      m->pc = methodAreaIndex + 4;
+      break;
+    }
+
+    case OP_NEWARRAY:
+    {
+      int32_t count = stack_pop(m->stack);
+
+      int32_t *data = calloc(count, sizeof(int32_t));
+
+      if(data == NULL){
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+      }
+
+      for(int i = 0; i < count; ++i){
+        data[i] = 0;
+      }
+
+      int32_t ref = heap_register(m->heap, data, count);
+      stack_push(m->stack, ref);
+      break;
+    }
+
+    case OP_IALOAD:
+    {
+      int32_t arrayref = stack_pop(m->stack);
+      int32_t index = stack_pop(m->stack);
+
+      int32_t *array = heap_get(m->heap, arrayref);  
+      int32_t value = array[index];                 
+
+      stack_push(m->stack, value);
+      break;
+
+    }
+
+    case OP_IASTORE:
+    {
+      int32_t arrayref = stack_pop(m->stack);
+      int32_t index = stack_pop(m->stack);
+      int32_t value = stack_pop(m->stack);
+
+      int32_t *array = heap_get(m->heap, arrayref);
+      array[index] = value;
+
+      break;
     }
 
     default:
@@ -463,6 +549,7 @@ uint8_t get_instruction(ijvm* m)
 ijvm* init_ijvm_std(char *binary_path) 
 {
   return init_ijvm(binary_path, stdin, stdout);
+  
 }
 
 void run(ijvm* m) 
@@ -470,6 +557,12 @@ void run(ijvm* m)
   while (!finished(m)) 
   {
     step(m);
+    if(stop_requested){
+      save_snapshot(m, "snapshot.ijvmstate");
+      m->halted = true;
+      break;
+    }
+    
   }
 }
 
@@ -479,17 +572,23 @@ void run(ijvm* m)
 
 uint32_t get_call_stack_size(ijvm* m) 
 {
-   // TODO: implement me if doing tail call bonus
-   return 0;
-}
+   uint32_t count = 0;
+   int32_t bp = m->bp;
 
+   // loop continues unitl it walks past first bp
+   while (bp != -1){
+    count ++;
+    bp = stack_get(m->stack, bp + 1); // get old bp
+   }
+
+   return count;
+}
 
 // Checks if reference is a freed heap array. Note that this assumes that 
 // 
 bool is_heap_freed(ijvm* m, uint32_t reference) 
 {
-   // TODO: implement me if doing garbage collection bonus
-   return false;
+   return m->heap->arrays[reference].freed;
 }
 
 // Checks if top of stack is a reference
@@ -499,3 +598,5 @@ bool is_tos_reference(ijvm* m)
 	//  using ANEWARRAY, AIALOAD and AIASTORE
 	return false;
 }
+
+
